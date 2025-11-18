@@ -13,7 +13,11 @@ if [ -f "$PIDFILE" ]; then
     rm -f "$PIDFILE" || true
   fi
 fi
-[ -x "$BIN" ] || { echo "Binary not found, run build.sh" >&2; exit 5; }
+if [ ! -x "$BIN" ]; then
+  echo "Binary not found at $BIN. Please run ./build.sh first." >&2
+  exit 5
+fi
 # start in background with redirected logs
 nohup "$BIN" >"$LOG" 2>&1 &
 echo $! > "$PIDFILE"
+echo "native_app started with pid $(cat "$PIDFILE")"
