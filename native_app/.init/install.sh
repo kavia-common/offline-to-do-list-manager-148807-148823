@@ -1,43 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
-WORKSPACE="/home/kavia/workspace/code-generation/offline-to-do-list-manager-148807-148823/native_app"
-cd "$WORKSPACE"
-NEEDS_GTK_DEV=0
-NEEDS_GTEST=0
-# robust detection using grep -q and find -print -quit
-if if grep -R -q "<gtk/" . 2>/dev/null; then true; else false; fi || if grep -R -q -E "find_package\(.*GTK|find_package.*gtk" . 2>/dev/null; then true; else false; fi; then
-  NEEDS_GTK_DEV=1
+# Install minimal system tooling for GTK4/CMake development and persist CC/CXX
+WS="${WORKSPACE:-/home/kavia/workspace/code-generation/offline-to-do-list-manager-148807-148823/native_app}"
+export WORKSPACE="$WS"
+PKGS=(cmake pkg-config libgtk-4-dev libx11-dev libwayland-dev libsqlite3-dev gdb curl)
+MISSING=()
+for p in "${PKGS[@]}"; do
+  if ! dpkg -s "$p" >/dev/null 2>&1; then MISSING+=("$p"); fi
+done
+if [ ${#MISSING[@]} -gt 0 ]; then
+  sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${MISSING[@]}" >/dev/null
 fi
-if find . -type f -name "*.ui" -print -quit | grep -q . 2>/dev/null; then NEEDS_GTK_DEV=1; fi
-if grep -R -q -E "enable_testing|find_package\(GTest\)|\bgtest\b" . 2>/dev/null || [ -d "$WORKSPACE/test" ] || [ -d "$WORKSPACE/tests" ]; then
-  NEEDS_GTEST=1
+# Validate cmake version >=3.16
+if ! command -v cmake >/dev/null 2>&1; then echo "ERROR: cmake not found; please install cmake >=3.16" >&2; exit 2; fi
+CMVER=$(cmake --version | head -n1 | awk '{print $3}')
+CM_MAJOR=$(echo "$CMVER" | cut -d. -f1)
+CM_MINOR=$(echo "$CMVER" | cut -d. -f2)
+if [ "$CM_MAJOR" -lt 3 ] || { [ "$CM_MAJOR" -eq 3 ] && [ "$CM_MINOR" -lt 16 ]; }; then
+  echo "ERROR: cmake >=3.16 required (found $CMVER). Install newer cmake or provide it in PATH." >&2
+  exit 3
 fi
-PKGS=()
-[ "$NEEDS_GTK_DEV" -eq 1 ] && PKGS+=(libgtk-4-dev)
-[ "$NEEDS_GTEST" -eq 1 ] && PKGS+=(libgtest-dev)
-# Only update/install when needed
-if [ ${#PKGS[@]} -ne 0 ]; then
-  sudo apt-get update -qq
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${PKGS[@]}" || { echo "apt install failed for: ${PKGS[*]}" >&2; exit 2; }
+# Ensure pkg-config can find gtk4
+if ! pkg-config --exists gtk4 >/dev/null 2>&1; then
+  echo "ERROR: pkg-config cannot find gtk4; verify libgtk-4-dev is installed." >&2
+  exit 4
 fi
-# If gtest sources installed, build them out-of-source and verify
-if [ "$NEEDS_GTEST" -eq 1 ] && [ -d /usr/src/gtest ]; then
-  sudo mkdir -p /tmp/gtest-build && sudo chown "$(id -u):$(id -g)" /tmp/gtest-build
-  pushd /tmp/gtest-build >/dev/null
-  cmake /usr/src/gtest -DCMAKE_INSTALL_PREFIX=/usr/local >gtest_build.log 2>&1 || { tail -n 200 gtest_build.log >&2; exit 3; }
-  make -j"$(nproc)" >gtest_build.log 2>&1 || { tail -n 200 gtest_build.log >&2; exit 4; }
-  sudo cp -a /usr/src/gtest/include/gtest /usr/local/include/ || true
-  if [ -f libgtest.a ] || [ -f libgtest_main.a ]; then
-    sudo cp -a libgtest*.a /usr/local/lib/ || true
-    sudo ldconfig
+# Persist CC/CXX idempotently
+PROFILE=/etc/profile.d/native_app_env.sh
+NEW_CONTENT=$'## native_app toolchain settings\n[ -z "${CC+x}" ] && export CC="/usr/bin/gcc"\n[ -z "${CXX+x}" ] && export CXX="/usr/bin/g++"\n'
+if sudo test -f "$PROFILE"; then
+  if ! sudo grep -q "native_app toolchain settings" "$PROFILE"; then
+    echo "$NEW_CONTENT" | sudo tee -a "$PROFILE" >/dev/null
   else
-    echo "gtest libs not built as expected" >&2; tail -n 200 gtest_build.log >&2; exit 5
+    # Ensure exports exist individually (idempotent append if missing)
+    sudo bash -c "grep -q '\\bexport CC=' '$PROFILE' || echo '[ -z "\${CC+x}" ] && export CC="/usr/bin/gcc"' >> '$PROFILE'"
+    sudo bash -c "grep -q '\\bexport CXX=' '$PROFILE' || echo '[ -z "\${CXX+x}" ] && export CXX="/usr/bin/g++"' >> '$PROFILE'"
   fi
-  popd >/dev/null
+else
+  echo "$NEW_CONTENT" | sudo tee "$PROFILE" >/dev/null
+  sudo chmod 644 "$PROFILE"
 fi
-# Ensure workspace writable non-recursively
-if [ ! -w "$WORKSPACE" ]; then sudo chown "$(id -u):$(id -g)" "$WORKSPACE"; fi
-# Emit minimal evidence: installed pkgs and tool versions
-if [ ${#PKGS[@]} -ne 0 ]; then echo "installed: ${PKGS[*]}"; fi
-command -v g++ >/dev/null 2>&1 && g++ --version | head -n1 || true
-command -v cmake >/dev/null 2>&1 && cmake --version | head -n1 || true
+# Ensure workspace exists and is owned by the invoking non-root user
+mkdir -p "$WS"
+OWN_USER="${SUDO_USER:-${USER:-}}"
+if [ -n "$OWN_USER" ]; then
+  sudo chown -R "$OWN_USER":"$OWN_USER" "$WS" || true
+fi
+# Optional tool notice
+if ! command -v gdb >/dev/null 2>&1; then echo "NOTE: gdb not found (optional)" >&2; fi
+# Final validation summary (minimal)
+command -v cmake >/dev/null && cmake --version | head -n1
+pkg-config --modversion gtk4 >/dev/null 2>&1 && echo "pkg-config: gtk4 OK"
+exit 0
